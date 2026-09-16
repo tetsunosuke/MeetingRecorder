@@ -19,7 +19,7 @@ public sealed class MainForm : Form
     private readonly Label _lblFile = new() { Text = "", AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Button _btnOpenFile = new() { Text = "録音ファイルを開く", Width = 150, Height = 30, Enabled = false };
     private readonly Button _btnOpenFolder = new() { Text = "フォルダを開く", Width = 150, Height = 30, Enabled = false };
-    private readonly Button _btnTranscribe = new() { Text = "文字起こしを再作成", Width = 160, Height = 30, Enabled = false };
+    private readonly Label _lblTranscribeStatus = new() { Text = "", AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 100 };
 
     private readonly TextBox _txtOutputFolder = new() { Width = 360 };
@@ -35,6 +35,7 @@ public sealed class MainForm : Form
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly AudioLevelMonitor _micMonitor = new();
     private readonly AudioLevelMonitor _speakerMonitor = new();
+    private readonly TranscriptionQueue _transcriptionQueue = new();
 
     public MainForm()
     {
@@ -68,10 +69,24 @@ public sealed class MainForm : Form
 
         _btnOpenFile.Click += (_, _) => OpenRecordedFile();
         _btnOpenFolder.Click += (_, _) => OpenContainingFolder();
-        _btnTranscribe.Click += async (_, _) => await TranscribeAsync();
 
         _txtOutputFolder.Leave += (_, _) => SaveSettingsFromUi();
         _chkAutoTranscribe.CheckedChanged += (_, _) => SaveSettingsFromUi();
+
+        _transcriptionQueue.StatusChanged += (_, status) =>
+        {
+            if (IsHandleCreated)
+                BeginInvoke(() => UpdateTranscribeStatusLabel(status));
+        };
+        _transcriptionQueue.JobFailed += (_, job) =>
+        {
+            if (IsHandleCreated)
+            {
+                BeginInvoke(() => MessageBox.Show(this,
+                    $"文字起こしに失敗しました({Path.GetFileName(job.WavPath)}):\n{job.Error.Message}",
+                    "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error));
+            }
+        };
 
         _recorder.ErrorOccurred += (_, ex) =>
         {
@@ -89,7 +104,36 @@ public sealed class MainForm : Form
                 _recorder.Stop();
             _micMonitor.Dispose();
             _speakerMonitor.Dispose();
+            Transcriber.ReleaseModel();
         };
+    }
+
+    private void UpdateTranscribeStatusLabel(TranscriptionQueue.Status status)
+    {
+        if (status.CurrentFileName == null)
+        {
+            _lblTranscribeStatus.Text = status.PendingCount > 0
+                ? $"文字起こし待機中... ({status.PendingCount}件)"
+                : "";
+            return;
+        }
+
+        var waiting = Math.Max(0, status.PendingCount - 1);
+        var waitingText = waiting > 0 ? $" (他に{waiting}件待機中)" : "";
+        var etaText = status.Eta.HasValue ? $"、残り目安{FormatEta(status.Eta.Value)}" : "";
+
+        // 進捗の割合(%)は、実際に文字起こしフェーズに入って何か認識できてから(fraction>0)表示する。
+        // 残り時間の目安は、音声の長さが判明した時点(準備中フェーズ)から出す。
+        _lblTranscribeStatus.Text = status.Fraction > 0
+            ? $"文字起こし中: {status.CurrentFileName} {status.Fraction:P0}{etaText}{waitingText}"
+            : $"{status.Phase} {status.CurrentFileName}{etaText}{waitingText}";
+    }
+
+    private static string FormatEta(TimeSpan eta)
+    {
+        if (eta.TotalMinutes >= 1)
+            return $"{(int)eta.TotalMinutes}分{eta.Seconds}秒";
+        return $"{Math.Max(1, eta.Seconds)}秒";
     }
 
     private void RestartMicMonitor()
@@ -133,18 +177,19 @@ public sealed class MainForm : Form
         _lblStatus.Top = 248;
         _lblFile.Left = left;
         _lblFile.Top = 274;
+        _lblTranscribeStatus.Left = left;
+        _lblTranscribeStatus.Top = 300;
+        _lblTranscribeStatus.MaximumSize = new Size(600, 0);
 
         _btnOpenFile.Left = left;
-        _btnOpenFile.Top = 304;
+        _btnOpenFile.Top = 332;
         _btnOpenFolder.Left = left + _btnOpenFile.Width + 12;
-        _btnOpenFolder.Top = 304;
-        _btnTranscribe.Left = left;
-        _btnTranscribe.Top = 344;
+        _btnOpenFolder.Top = 332;
 
         _tabRecord.Controls.AddRange(new Control[]
         {
             lblMic, _cmbMic, _meterMic, lblSpeaker, _cmbSpeaker, _meterSpeaker,
-            _btnStart, _btnStop, _lblStatus, _lblFile, _btnOpenFile, _btnOpenFolder, _btnTranscribe
+            _btnStart, _btnStop, _lblStatus, _lblFile, _lblTranscribeStatus, _btnOpenFile, _btnOpenFolder
         });
     }
 
@@ -179,48 +224,6 @@ public sealed class MainForm : Form
         _settings.OutputFolder = _txtOutputFolder.Text;
         _settings.AutoTranscribe = _chkAutoTranscribe.Checked;
         _settings.Save();
-    }
-
-    private async Task TranscribeAsync()
-    {
-        if (string.IsNullOrEmpty(_recorder.OutputPath) || !File.Exists(_recorder.OutputPath))
-        {
-            MessageBox.Show(this, "録音ファイルが見つかりません。", "確認",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        if (!Transcriber.IsModelDownloaded)
-        {
-            var proceed = MessageBox.Show(this,
-                "初回のみ、文字起こし用のWhisperモデル(small, 約500MB)をダウンロードします。\nよろしいですか?",
-                "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (proceed != DialogResult.Yes)
-                return;
-        }
-
-        var wavPath = _recorder.OutputPath;
-        var txtPath = Path.ChangeExtension(wavPath, ".txt");
-        var previousStatus = _lblStatus.Text;
-
-        _btnTranscribe.Enabled = false;
-        _lblStatus.Text = "文字起こし中... (Whisper small)";
-
-        try
-        {
-            await Transcriber.TranscribeToTextFileAsync(wavPath, txtPath);
-            _lblStatus.Text = "文字起こし完了";
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"文字起こしに失敗しました:\n{ex.Message}", "エラー",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _lblStatus.Text = previousStatus;
-        }
-        finally
-        {
-            _btnTranscribe.Enabled = true;
-        }
     }
 
     private void OpenRecordedFile()
@@ -290,10 +293,8 @@ public sealed class MainForm : Form
         var fileName = $"meeting_{DateTime.Now:yyyyMMdd_HHmmss}.wav";
         var fullPath = Path.Combine(_txtOutputFolder.Text, fileName);
 
-        // 監視用の軽量キャプチャを止めてから本番の録音を開始する
-        _micMonitor.Stop();
-        _speakerMonitor.Stop();
-
+        // マイク・スピーカーのレベルメーター用モニターはWASAPI共有モードなので、
+        // 本番録音と並行して動かし続けて構わない(録音前後も含めて常時表示するため)。
         try
         {
             _recorder.Start(fullPath, micItem.Device, speakerItem.Device);
@@ -302,8 +303,6 @@ public sealed class MainForm : Form
         {
             MessageBox.Show(this, $"録音を開始できませんでした:\n{ex.Message}", "エラー",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
-            RestartMicMonitor();
-            RestartSpeakerMonitor();
             return;
         }
 
@@ -314,30 +313,39 @@ public sealed class MainForm : Form
         _cmbSpeaker.Enabled = false;
         _btnOpenFile.Enabled = false;
         _btnOpenFolder.Enabled = false;
-        _btnTranscribe.Enabled = false;
-        _uiTimer.Start();
         UpdateStatus();
     }
 
-    private async Task StopRecordingAsync()
+    private Task StopRecordingAsync()
     {
-        _uiTimer.Stop();
         _btnStop.Enabled = false;
         _recorder.Stop();
+        var wavPath = _recorder.OutputPath;
 
         _btnStart.Enabled = true;
         _cmbMic.Enabled = true;
         _cmbSpeaker.Enabled = true;
         _btnOpenFile.Enabled = true;
         _btnOpenFolder.Enabled = true;
-        _btnTranscribe.Enabled = true;
         _lblStatus.Text = "停止しました";
 
-        RestartMicMonitor();
-        RestartSpeakerMonitor();
+        if (_settings.AutoTranscribe && !string.IsNullOrEmpty(wavPath))
+        {
+            if (!Transcriber.IsModelDownloaded)
+            {
+                var proceed = MessageBox.Show(this,
+                    "初回のみ、文字起こし用のWhisperモデル(small, 約500MB)をダウンロードします。\nよろしいですか?",
+                    "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (proceed == DialogResult.Yes)
+                    _transcriptionQueue.Enqueue(wavPath);
+            }
+            else
+            {
+                _transcriptionQueue.Enqueue(wavPath);
+            }
+        }
 
-        if (_settings.AutoTranscribe)
-            await TranscribeAsync();
+        return Task.CompletedTask;
     }
 
     private void UpdateStatus()
