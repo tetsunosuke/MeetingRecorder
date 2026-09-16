@@ -36,6 +36,12 @@ public sealed class MainForm : Form
     private readonly AudioLevelMonitor _micMonitor = new();
     private readonly AudioLevelMonitor _speakerMonitor = new();
     private readonly TranscriptionQueue _transcriptionQueue = new();
+    private readonly NotifyIcon _notifyIcon = new()
+    {
+        Icon = SystemIcons.Information,
+        Text = "MeetingRecorder",
+        Visible = true,
+    };
 
     public MainForm()
     {
@@ -87,6 +93,16 @@ public sealed class MainForm : Form
                     "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error));
             }
         };
+        _transcriptionQueue.JobCompleted += (_, wavPath) =>
+        {
+            if (IsHandleCreated)
+                BeginInvoke(() => NotifyTranscriptionCompleted(wavPath));
+        };
+        _notifyIcon.BalloonTipClicked += (_, _) =>
+        {
+            if (_pendingBalloonTxtPath != null && File.Exists(_pendingBalloonTxtPath))
+                Process.Start(new ProcessStartInfo(_pendingBalloonTxtPath) { UseShellExecute = true });
+        };
 
         _recorder.ErrorOccurred += (_, ex) =>
         {
@@ -105,7 +121,20 @@ public sealed class MainForm : Form
             _micMonitor.Dispose();
             _speakerMonitor.Dispose();
             Transcriber.ReleaseModel();
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
         };
+    }
+
+    private string? _pendingBalloonTxtPath;
+
+    private void NotifyTranscriptionCompleted(string wavPath)
+    {
+        _pendingBalloonTxtPath = Path.ChangeExtension(wavPath, ".txt");
+        _notifyIcon.BalloonTipIcon = ToolTipIcon.Info;
+        _notifyIcon.BalloonTipTitle = "文字起こしが完了しました";
+        _notifyIcon.BalloonTipText = Path.GetFileName(wavPath) + "(クリックで結果を開く)";
+        _notifyIcon.ShowBalloonTip(5000);
     }
 
     private void UpdateTranscribeStatusLabel(TranscriptionQueue.Status status)
@@ -156,13 +185,13 @@ public sealed class MainForm : Form
     {
         const int left = 20;
 
-        var lblMic = new Label { Text = "マイク(自分の声):", AutoSize = true, Left = left, Top = 20 };
+        var lblMic = new Label { Text = "マイク入力(自分の声を録音):", AutoSize = true, Left = left, Top = 20 };
         _cmbMic.Left = left;
         _cmbMic.Top = 44;
         _meterMic.Left = left;
         _meterMic.Top = 72;
 
-        var lblSpeaker = new Label { Text = "スピーカー出力(相手の声・録音対象):", AutoSize = true, Left = left, Top = 104 };
+        var lblSpeaker = new Label { Text = "スピーカー出力(相手の声などを録音):", AutoSize = true, Left = left, Top = 104 };
         _cmbSpeaker.Left = left;
         _cmbSpeaker.Top = 128;
         _meterSpeaker.Left = left;

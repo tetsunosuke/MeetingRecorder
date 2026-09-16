@@ -21,6 +21,7 @@ public sealed class TranscriptionQueue
 
     public event EventHandler<Status>? StatusChanged;
     public event EventHandler<(string WavPath, Exception Error)>? JobFailed;
+    public event EventHandler<string>? JobCompleted;
 
     public TranscriptionQueue()
     {
@@ -74,6 +75,8 @@ public sealed class TranscriptionQueue
                     var observed = sw.Elapsed.TotalSeconds / audioDurationSeconds.Value;
                     _secondsPerAudioSecond = (_secondsPerAudioSecond + observed) / 2.0;
                 }
+
+                JobCompleted?.Invoke(this, wavPath);
             }
             catch (Exception ex)
             {
