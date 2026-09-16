@@ -149,19 +149,33 @@ public sealed class AudioRecorder : IDisposable
         _pumpTimer?.Dispose();
         _pumpTimer = null;
 
-        // バッファに残っている分を最後まで書き出す
+        _micCapture?.StopRecording();
+        _loopbackCapture?.StopRecording();
+
+        // キャプチャ停止直後に届く最後のDataAvailableがバッファに乗るまで少し待つ
+        Thread.Sleep(150);
+
+        // バッファに残っている分を書き出す。
+        // _mixerはReadFully=trueのため、空になっても無音で埋めて要求サイズを返し続け、
+        // 絶対に0を返さない(=while(read>0)で回すと無限ループしてUIがフリーズする)。
+        // 実際に溜まっているバイト数から必要な回数だけ読む。
         if (_mixer != null && _writer != null)
         {
             lock (_writeLock)
             {
-                int read;
-                while ((read = _mixer.Read(_pumpBuffer, 0, _pumpBuffer.Length)) > 0)
+                int bufferedBytes = (_micBuffer?.BufferedBytes ?? 0) + (_loopbackBuffer?.BufferedBytes ?? 0);
+                int chunkBytes = _pumpBuffer.Length * sizeof(float);
+                int chunksToFlush = bufferedBytes / chunkBytes + 2;
+
+                for (int i = 0; i < chunksToFlush; i++)
+                {
+                    int read = _mixer.Read(_pumpBuffer, 0, _pumpBuffer.Length);
+                    if (read <= 0)
+                        break;
                     _writer.WriteSamples(_pumpBuffer, 0, read);
+                }
             }
         }
-
-        _micCapture?.StopRecording();
-        _loopbackCapture?.StopRecording();
 
         if (_micCapture != null)
         {
