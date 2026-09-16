@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using NAudio.CoreAudioApi;
 
-namespace ZoomRecorder;
+namespace MeetingRecorder;
 
 public sealed class MainForm : Form
 {
@@ -22,7 +22,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Zoom通話レコーダー";
+        Text = "MeetingRecorder";
         Width = 640;
         Height = 480;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -161,7 +161,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        var fileName = $"zoom_{DateTime.Now:yyyyMMdd_HHmmss}.wav";
+        var fileName = $"meeting_{DateTime.Now:yyyyMMdd_HHmmss}.wav";
         var fullPath = Path.Combine(_txtOutputFolder.Text, fileName);
 
         try

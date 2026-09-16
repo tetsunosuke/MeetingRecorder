@@ -7,8 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <AssemblyName>ZoomRecorder</AssemblyName>
-    <RootNamespace>ZoomRecorder</RootNamespace>
+    <AssemblyName>MeetingRecorder</AssemblyName>
+    <RootNamespace>MeetingRecorder</RootNamespace>
     <Platforms>x64</Platforms>
   </PropertyGroup>
 

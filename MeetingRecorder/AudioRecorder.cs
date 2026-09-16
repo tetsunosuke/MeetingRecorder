@@ -2,7 +2,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
-namespace ZoomRecorder;
+namespace MeetingRecorder;
 
 /// <summary>
 /// マイク入力(WasapiCapture)とスピーカー出力(WasapiLoopbackCapture)を同時にキャプチャし、

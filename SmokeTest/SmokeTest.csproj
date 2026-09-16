@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="..\ZoomRecorder\AudioRecorder.cs" Link="AudioRecorder.cs" />
+    <Compile Include="..\MeetingRecorder\AudioRecorder.cs" Link="AudioRecorder.cs" />
   </ItemGroup>
 
 </Project>

@@ -1,4 +1,4 @@
-namespace ZoomRecorder;
+namespace MeetingRecorder;
 
 internal static class Program
 {
