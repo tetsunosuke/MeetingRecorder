@@ -1,32 +1,26 @@
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
+using MeetingRecorder;
 
-var enumerator = new MMDeviceEnumerator();
-var mic = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia);
-Console.WriteLine($"Mic: {mic.FriendlyName}");
+var wavPath = args.Length > 0 ? args[0] : throw new ArgumentException("wavパスを指定してください");
+var txtPath = Path.ChangeExtension(wavPath, ".transcript.txt");
 
-// AUTOCONVERTPCM/SRC flags are what NAudio's WasapiCapture always adds for shared mode.
-// Loopback capture doesn't use them and works. Test capture WITHOUT them, using the
-// device's exact native mix format (no conversion needed at all).
-var noFlags = new NoConvertCapture(mic);
-Console.WriteLine($"WaveFormat: {noFlags.WaveFormat}");
-try
+Console.WriteLine($"Input:  {wavPath}");
+Console.WriteLine($"Output: {txtPath}");
+Console.WriteLine("Ensuring model is downloaded (small, ~500MB)...");
+
+var sw = System.Diagnostics.Stopwatch.StartNew();
+await Transcriber.EnsureModelDownloadedAsync();
+Console.WriteLine($"Model ready after {sw.Elapsed}");
+
+sw.Restart();
+await Transcriber.TranscribeToTextFileAsync(wavPath, txtPath);
+Console.WriteLine($"Transcription done in {sw.Elapsed}");
+
+if (File.Exists(txtPath))
 {
-    bool gotData = false;
-    long bytes = 0;
-    noFlags.DataAvailable += (_, e) => { gotData = true; bytes += e.BytesRecorded; };
-    noFlags.StartRecording();
-    Thread.Sleep(800);
-    noFlags.StopRecording();
-    Console.WriteLine($"NoConvertCapture OK, gotData={gotData}, bytes={bytes}");
+    Console.WriteLine("=== Transcript ===");
+    Console.WriteLine(File.ReadAllText(txtPath));
 }
-catch (Exception ex)
+else
 {
-    Console.WriteLine($"NoConvertCapture FAILED: {ex.GetType().Name}: {ex.Message}");
-}
-
-sealed class NoConvertCapture : WasapiCapture
-{
-    public NoConvertCapture(MMDevice device) : base(device) { }
-    protected override AudioClientStreamFlags GetAudioClientStreamFlags() => AudioClientStreamFlags.None;
+    Console.WriteLine("FAILED: transcript not created.");
 }

@@ -10,10 +10,13 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\MeetingRecorder\AudioRecorder.cs" Link="AudioRecorder.cs" />
+    <Compile Include="..\MeetingRecorder\Transcriber.cs" Link="Transcriber.cs" />
   </ItemGroup>
 
 </Project>
