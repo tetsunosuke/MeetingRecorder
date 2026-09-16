@@ -1,17 +1,20 @@
+using System.Diagnostics;
 using NAudio.CoreAudioApi;
 
 namespace ZoomRecorder;
 
 public sealed class MainForm : Form
 {
-    private readonly ComboBox _cmbMic = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 380 };
-    private readonly ComboBox _cmbSpeaker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 380 };
-    private readonly TextBox _txtOutputFolder = new() { Width = 320 };
+    private readonly ComboBox _cmbMic = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420 };
+    private readonly ComboBox _cmbSpeaker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420 };
+    private readonly TextBox _txtOutputFolder = new() { Width = 360 };
     private readonly Button _btnBrowse = new() { Text = "参照...", Width = 80 };
-    private readonly Button _btnStart = new() { Text = "録音開始", Width = 120, Height = 36 };
-    private readonly Button _btnStop = new() { Text = "録音停止", Width = 120, Height = 36, Enabled = false };
+    private readonly Button _btnStart = new() { Text = "録音開始", Width = 130, Height = 36 };
+    private readonly Button _btnStop = new() { Text = "録音停止", Width = 130, Height = 36, Enabled = false };
     private readonly Label _lblStatus = new() { Text = "待機中", AutoSize = true };
     private readonly Label _lblFile = new() { Text = "", AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly Button _btnOpenFile = new() { Text = "録音ファイルを開く", Width = 150, Height = 30, Enabled = false };
+    private readonly Button _btnOpenFolder = new() { Text = "フォルダを開く", Width = 150, Height = 30, Enabled = false };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 500 };
 
     private readonly AudioRecorder _recorder = new();
@@ -20,8 +23,8 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "Zoom通話レコーダー";
-        Width = 560;
-        Height = 340;
+        Width = 640;
+        Height = 480;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -36,6 +39,9 @@ public sealed class MainForm : Form
         _btnStart.Click += (_, _) => StartRecording();
         _btnStop.Click += (_, _) => StopRecording();
         _uiTimer.Tick += (_, _) => UpdateStatus();
+
+        _btnOpenFile.Click += (_, _) => OpenRecordedFile();
+        _btnOpenFolder.Click += (_, _) => OpenContainingFolder();
 
         _recorder.ErrorOccurred += (_, ex) =>
         {
@@ -56,35 +62,66 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var lblMic = new Label { Text = "マイク(自分の声):", AutoSize = true, Left = 16, Top = 20 };
-        _cmbMic.Left = 16;
+        const int left = 20;
+
+        var lblMic = new Label { Text = "マイク(自分の声):", AutoSize = true, Left = left, Top = 20 };
+        _cmbMic.Left = left;
         _cmbMic.Top = 44;
 
-        var lblSpeaker = new Label { Text = "スピーカー出力(相手の声・録音対象):", AutoSize = true, Left = 16, Top = 80 };
-        _cmbSpeaker.Left = 16;
-        _cmbSpeaker.Top = 104;
+        var lblSpeaker = new Label { Text = "スピーカー出力(相手の声・録音対象):", AutoSize = true, Left = left, Top = 84 };
+        _cmbSpeaker.Left = left;
+        _cmbSpeaker.Top = 108;
 
-        var lblFolder = new Label { Text = "保存先フォルダ:", AutoSize = true, Left = 16, Top = 140 };
-        _txtOutputFolder.Left = 16;
-        _txtOutputFolder.Top = 164;
-        _btnBrowse.Left = 344;
-        _btnBrowse.Top = 162;
+        var lblFolder = new Label { Text = "保存先フォルダ:", AutoSize = true, Left = left, Top = 148 };
+        _txtOutputFolder.Left = left;
+        _txtOutputFolder.Top = 172;
+        _btnBrowse.Left = left + _txtOutputFolder.Width + 12;
+        _btnBrowse.Top = 170;
 
-        _btnStart.Left = 16;
-        _btnStart.Top = 210;
-        _btnStop.Left = 150;
-        _btnStop.Top = 210;
+        _btnStart.Left = left;
+        _btnStart.Top = 220;
+        _btnStop.Left = left + _btnStart.Width + 16;
+        _btnStop.Top = 220;
 
-        _lblStatus.Left = 16;
-        _lblStatus.Top = 260;
-        _lblFile.Left = 16;
-        _lblFile.Top = 284;
+        _lblStatus.Left = left;
+        _lblStatus.Top = 270;
+        _lblFile.Left = left;
+        _lblFile.Top = 296;
+
+        _btnOpenFile.Left = left;
+        _btnOpenFile.Top = 326;
+        _btnOpenFolder.Left = left + _btnOpenFile.Width + 12;
+        _btnOpenFolder.Top = 326;
 
         Controls.AddRange(new Control[]
         {
             lblMic, _cmbMic, lblSpeaker, _cmbSpeaker, lblFolder, _txtOutputFolder, _btnBrowse,
-            _btnStart, _btnStop, _lblStatus, _lblFile
+            _btnStart, _btnStop, _lblStatus, _lblFile, _btnOpenFile, _btnOpenFolder
         });
+    }
+
+    private void OpenRecordedFile()
+    {
+        if (string.IsNullOrEmpty(_recorder.OutputPath) || !File.Exists(_recorder.OutputPath))
+        {
+            MessageBox.Show(this, "録音ファイルが見つかりません。", "確認",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo(_recorder.OutputPath) { UseShellExecute = true });
+    }
+
+    private void OpenContainingFolder()
+    {
+        if (string.IsNullOrEmpty(_recorder.OutputPath) || !File.Exists(_recorder.OutputPath))
+        {
+            MessageBox.Show(this, "録音ファイルが見つかりません。", "確認",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_recorder.OutputPath}\"") { UseShellExecute = true });
     }
 
     private void LoadDevices()
@@ -145,6 +182,8 @@ public sealed class MainForm : Form
         _cmbSpeaker.Enabled = false;
         _txtOutputFolder.Enabled = false;
         _btnBrowse.Enabled = false;
+        _btnOpenFile.Enabled = false;
+        _btnOpenFolder.Enabled = false;
         _uiTimer.Start();
         UpdateStatus();
     }
@@ -160,6 +199,8 @@ public sealed class MainForm : Form
         _cmbSpeaker.Enabled = true;
         _txtOutputFolder.Enabled = true;
         _btnBrowse.Enabled = true;
+        _btnOpenFile.Enabled = true;
+        _btnOpenFolder.Enabled = true;
         _lblStatus.Text = "停止しました";
     }
 
