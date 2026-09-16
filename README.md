@@ -30,12 +30,23 @@ Zoomに限らず、通話・会議アプリの音声をローカルで録音し�
 
 ## ビルド
 
+開発用(このPCで動かすだけ、.NET 8 Desktop Runtimeが前提):
+
 ```
 cd MeetingRecorder
 dotnet build -c Release
 ```
 
 `MeetingRecorder/bin/Release/net8.0-windows/MeetingRecorder.exe` が生成される。
+
+配布用(自己完結型、.NET Desktop Runtimeが入っていないPCでもそのまま動く。Releasesのzipはこちらでビルドしている):
+
+```
+cd MeetingRecorder
+dotnet publish -c Release -r win-x64 --self-contained true
+```
+
+`MeetingRecorder/bin/Release/net8.0-windows/win-x64/publish/` 以下に、ランタイム同梱の実行ファイル一式が生成される(約130MB)。
 
 ## 文字起こしについて
 
