@@ -19,12 +19,21 @@ public sealed class AudioRecorder : IDisposable
     private BufferedWaveProvider? _loopbackBuffer;
     private MixingSampleProvider? _mixer;
     private WaveFileWriter? _writer;
+    private WaveFileWriter? _micWriter;
+    private WaveFileWriter? _speakerWriter;
     private System.Threading.Timer? _pumpTimer;
     private float[] _pumpBuffer = Array.Empty<float>();
     private readonly object _writeLock = new();
 
     public bool IsRecording { get; private set; }
     public string? OutputPath { get; private set; }
+
+    /// <summary>マイク単独の録音ファイル(話者分離用)。</summary>
+    public string? MicOutputPath { get; private set; }
+
+    /// <summary>スピーカー出力単独の録音ファイル(話者分離用)。</summary>
+    public string? SpeakerOutputPath { get; private set; }
+
     public TimeSpan Elapsed => _writer?.TotalTime ?? TimeSpan.Zero;
 
     public event EventHandler<Exception>? ErrorOccurred;
@@ -35,6 +44,8 @@ public sealed class AudioRecorder : IDisposable
             throw new InvalidOperationException("既に録音中です。");
 
         OutputPath = outputPath;
+        MicOutputPath = InsertSuffix(outputPath, "_mic");
+        SpeakerOutputPath = InsertSuffix(outputPath, "_speaker");
 
         using var enumerator = new MMDeviceEnumerator();
         var mic = micDevice ?? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
@@ -77,6 +88,9 @@ public sealed class AudioRecorder : IDisposable
             Directory.CreateDirectory(dir);
 
         _writer = new WaveFileWriter(outputPath, _targetFormat);
+        // 話者分離のため、マイクとスピーカーはミックス前の単独音声も別ファイルに残す。
+        _micWriter = new WaveFileWriter(MicOutputPath, _micCapture.WaveFormat);
+        _speakerWriter = new WaveFileWriter(SpeakerOutputPath, _loopbackCapture.WaveFormat);
         _pumpBuffer = new float[_targetFormat.SampleRate / (1000 / PumpIntervalMs) * _targetFormat.Channels];
 
         _micCapture.StartRecording();
@@ -86,11 +100,19 @@ public sealed class AudioRecorder : IDisposable
         _pumpTimer = new System.Threading.Timer(PumpAudio, null, PumpIntervalMs, PumpIntervalMs);
     }
 
-    private void OnMicDataAvailable(object? sender, WaveInEventArgs e) =>
+    private void OnMicDataAvailable(object? sender, WaveInEventArgs e)
+    {
         _micBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+        lock (_writeLock)
+            _micWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+    }
 
-    private void OnLoopbackDataAvailable(object? sender, WaveInEventArgs e) =>
+    private void OnLoopbackDataAvailable(object? sender, WaveInEventArgs e)
+    {
         _loopbackBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+        lock (_writeLock)
+            _speakerWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+    }
 
     private void OnCaptureStopped(object? sender, StoppedEventArgs e)
     {
@@ -123,6 +145,14 @@ public sealed class AudioRecorder : IDisposable
 
     private static WaveFormat SimplifyFormat(WaveFormat format) =>
         WaveFormat.CreateIeeeFloatWaveFormat(format.SampleRate, format.Channels);
+
+    private static string InsertSuffix(string path, string suffix)
+    {
+        var dir = Path.GetDirectoryName(path) ?? "";
+        var name = Path.GetFileNameWithoutExtension(path);
+        var ext = Path.GetExtension(path);
+        return Path.Combine(dir, $"{name}{suffix}{ext}");
+    }
 
     private ISampleProvider ToTargetFormat(ISampleProvider source)
     {
@@ -190,6 +220,13 @@ public sealed class AudioRecorder : IDisposable
 
         _writer?.Dispose();
         _writer = null;
+        lock (_writeLock)
+        {
+            _micWriter?.Dispose();
+            _micWriter = null;
+            _speakerWriter?.Dispose();
+            _speakerWriter = null;
+        }
 
         _micCapture?.Dispose();
         _micCapture = null;

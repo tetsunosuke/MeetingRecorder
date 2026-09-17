@@ -12,6 +12,8 @@ namespace MeetingRecorder;
 /// </summary>
 public static class Transcriber
 {
+    private const float NoSpeechThreshold = 0.6f;
+
     private static string ModelDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeetingRecorder", "models");
 
@@ -63,24 +65,20 @@ public static class Transcriber
         _cachedFactory = null;
     }
 
-    /// <param name="onProgress">0.0〜1.0の進捗を報告するコールバック(文字起こしフェーズ中のみ呼ばれる)。</param>
-    /// <param name="onPhase">現在のフェーズを表す短い文言("モデルを準備中..."など)を報告するコールバック。</param>
-    /// <param name="onDurationKnown">音声の長さが判明した時点(処理の最初)で一度だけ呼ばれる。
-    /// これを使えば、実際の文字起こしが始まる前から目安の所要時間を計算できる。</param>
-    /// 呼び出し元のスレッドからそのまま呼ばれるため、UIスレッドへのマーシャリングは呼び出し側の責任。
-    public static async Task TranscribeToTextFileAsync(
-        string wavPath, string txtPath,
-        Action<double>? onProgress = null,
-        Action<string>? onPhase = null,
-        Action<TimeSpan>? onDurationKnown = null)
+    private readonly record struct RawSegment(TimeSpan Start, TimeSpan End, string Text, float NoSpeechProbability);
+
+    private static string FormatText(RawSegment segment) =>
+        segment.NoSpeechProbability > NoSpeechThreshold ? $"(不明瞭) {segment.Text}" : segment.Text;
+
+    /// <summary>1本のWAVを文字起こしし、区間ごとのセグメント一覧を返す(ファイル書き出しはしない)。</summary>
+    private static async Task<List<RawSegment>> TranscribeSegmentsAsync(
+        string wavPath, WhisperFactory whisperFactory, Action<double>? onProgress, Action<string>? onPhase)
     {
         TimeSpan totalDuration;
         using var wavStream = new MemoryStream();
         using (var reader = new WaveFileReader(wavPath))
         {
             totalDuration = reader.TotalTime;
-            onDurationKnown?.Invoke(totalDuration);
-
             onPhase?.Invoke("音声を変換中...");
 
             // Whisperは16kHzモノラルのWAVしか受け付けないため変換する
@@ -94,19 +92,15 @@ public static class Transcriber
 
         wavStream.Seek(0, SeekOrigin.Begin);
 
-        onPhase?.Invoke("モデルを準備中...");
-        await EnsureModelDownloadedAsync().ConfigureAwait(false);
-        var whisperFactory = await GetOrLoadFactoryAsync().ConfigureAwait(false);
-
         using var processor = whisperFactory.CreateBuilder()
             .WithLanguage("auto")
             .Build();
 
         onPhase?.Invoke("文字起こし中...");
-        var sb = new StringBuilder();
+        var segments = new List<RawSegment>();
         await foreach (var segment in processor.ProcessAsync(wavStream).ConfigureAwait(false))
         {
-            sb.AppendLine($"[{segment.Start}-{segment.End}] {segment.Text.Trim()}");
+            segments.Add(new RawSegment(segment.Start, segment.End, segment.Text.Trim(), segment.NoSpeechProbability));
 
             if (totalDuration > TimeSpan.Zero)
             {
@@ -114,6 +108,80 @@ public static class Transcriber
                 onProgress?.Invoke(fraction);
             }
         }
+
+        return segments;
+    }
+
+    /// <summary>
+    /// 1本のWAVをそのまま文字起こしする(話者分離なし)。手動でファイルを選んで再文字起こしする場合に使う。
+    /// </summary>
+    public static async Task TranscribeToTextFileAsync(
+        string wavPath, string txtPath,
+        Action<double>? onProgress = null,
+        Action<string>? onPhase = null,
+        Action<TimeSpan>? onDurationKnown = null)
+    {
+        TimeSpan duration;
+        using (var probe = new WaveFileReader(wavPath))
+            duration = probe.TotalTime;
+        onDurationKnown?.Invoke(duration);
+
+        await EnsureModelDownloadedAsync().ConfigureAwait(false);
+        var whisperFactory = await GetOrLoadFactoryAsync().ConfigureAwait(false);
+
+        var segments = await TranscribeSegmentsAsync(wavPath, whisperFactory, onProgress, onPhase).ConfigureAwait(false);
+
+        var sb = new StringBuilder();
+        foreach (var segment in segments)
+            sb.AppendLine($"[{segment.Start}-{segment.End}] {FormatText(segment)}");
+
+        await File.WriteAllTextAsync(txtPath, sb.ToString(), Encoding.UTF8).ConfigureAwait(false);
+        onProgress?.Invoke(1.0);
+    }
+
+    /// <summary>
+    /// マイクとスピーカー出力を別々に文字起こしし、時系列順にマージして話者ラベル付きの
+    /// 1本のテキストにまとめる。録音停止後の自動文字起こしはこちらを使う。
+    /// </summary>
+    public static async Task TranscribeDiarizedToTextFileAsync(
+        string micWavPath, string speakerWavPath, string txtPath,
+        Action<double>? onProgress = null,
+        Action<string>? onPhase = null,
+        Action<TimeSpan>? onDurationKnown = null)
+    {
+        TimeSpan micDuration, speakerDuration;
+        using (var probe = new WaveFileReader(micWavPath)) micDuration = probe.TotalTime;
+        using (var probe = new WaveFileReader(speakerWavPath)) speakerDuration = probe.TotalTime;
+
+        onDurationKnown?.Invoke(micDuration > speakerDuration ? micDuration : speakerDuration);
+
+        await EnsureModelDownloadedAsync().ConfigureAwait(false);
+        var whisperFactory = await GetOrLoadFactoryAsync().ConfigureAwait(false);
+
+        // 進捗はマイク・スピーカーそれぞれの長さに応じた重み付けで合算する
+        var totalSeconds = micDuration.TotalSeconds + speakerDuration.TotalSeconds;
+        var micWeight = totalSeconds > 0 ? micDuration.TotalSeconds / totalSeconds : 0.5;
+
+        onPhase?.Invoke("自分の声を文字起こし中...");
+        var micSegments = await TranscribeSegmentsAsync(
+            micWavPath, whisperFactory,
+            fraction => onProgress?.Invoke(fraction * micWeight),
+            onPhase).ConfigureAwait(false);
+
+        onPhase?.Invoke("相手の声を文字起こし中...");
+        var speakerSegments = await TranscribeSegmentsAsync(
+            speakerWavPath, whisperFactory,
+            fraction => onProgress?.Invoke(micWeight + fraction * (1 - micWeight)),
+            onPhase).ConfigureAwait(false);
+
+        var merged = micSegments.Select(s => (Segment: s, Speaker: "自分"))
+            .Concat(speakerSegments.Select(s => (Segment: s, Speaker: "相手")))
+            .OrderBy(s => s.Segment.Start)
+            .ToList();
+
+        var sb = new StringBuilder();
+        foreach (var (segment, speaker) in merged)
+            sb.AppendLine($"[{segment.Start}-{segment.End}] [{speaker}] {FormatText(segment)}");
 
         await File.WriteAllTextAsync(txtPath, sb.ToString(), Encoding.UTF8).ConfigureAwait(false);
         onProgress?.Invoke(1.0);

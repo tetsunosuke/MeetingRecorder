@@ -19,6 +19,7 @@ public sealed class MainForm : Form
     private readonly Label _lblFile = new() { Text = "", AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Button _btnOpenFile = new() { Text = "録音ファイルを開く", Width = 150, Height = 30, Enabled = false };
     private readonly Button _btnOpenFolder = new() { Text = "フォルダを開く", Width = 150, Height = 30, Enabled = false };
+    private readonly Button _btnTranscribeFile = new() { Text = "音声ファイルを文字起こし...", Width = 190, Height = 30 };
     private readonly Label _lblTranscribeStatus = new() { Text = "", AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 100 };
 
@@ -47,7 +48,7 @@ public sealed class MainForm : Form
     {
         Text = "MeetingRecorder";
         Width = 660;
-        Height = 560;
+        Height = 600;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -75,6 +76,7 @@ public sealed class MainForm : Form
 
         _btnOpenFile.Click += (_, _) => OpenRecordedFile();
         _btnOpenFolder.Click += (_, _) => OpenContainingFolder();
+        _btnTranscribeFile.Click += (_, _) => PickAndTranscribeFile();
 
         _txtOutputFolder.Leave += (_, _) => SaveSettingsFromUi();
         _chkAutoTranscribe.CheckedChanged += (_, _) => SaveSettingsFromUi();
@@ -214,11 +216,14 @@ public sealed class MainForm : Form
         _btnOpenFile.Top = 332;
         _btnOpenFolder.Left = left + _btnOpenFile.Width + 12;
         _btnOpenFolder.Top = 332;
+        _btnTranscribeFile.Left = left;
+        _btnTranscribeFile.Top = 372;
 
         _tabRecord.Controls.AddRange(new Control[]
         {
             lblMic, _cmbMic, _meterMic, lblSpeaker, _cmbSpeaker, _meterSpeaker,
-            _btnStart, _btnStop, _lblStatus, _lblFile, _lblTranscribeStatus, _btnOpenFile, _btnOpenFolder
+            _btnStart, _btnStop, _lblStatus, _lblFile, _lblTranscribeStatus, _btnOpenFile, _btnOpenFolder,
+            _btnTranscribeFile
         });
     }
 
@@ -253,6 +258,49 @@ public sealed class MainForm : Form
         _settings.OutputFolder = _txtOutputFolder.Text;
         _settings.AutoTranscribe = _chkAutoTranscribe.Checked;
         _settings.Save();
+    }
+
+    private void PickAndTranscribeFile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "文字起こしする音声ファイルを選択",
+            Filter = "WAVファイル (*.wav)|*.wav|すべてのファイル (*.*)|*.*",
+            InitialDirectory = Directory.Exists(_txtOutputFolder.Text)
+                ? _txtOutputFolder.Text
+                : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+        };
+
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            EnqueueTranscriptionWithConsent(dialog.FileName);
+    }
+
+    /// <summary>
+    /// Whisperモデルが未ダウンロードなら確認ダイアログを出す。Noなら文字起こしを行わない。
+    /// </summary>
+    private bool ConfirmModelDownloadIfNeeded()
+    {
+        if (Transcriber.IsModelDownloaded)
+            return true;
+
+        var proceed = MessageBox.Show(this,
+            "初回のみ、文字起こし用のWhisperモデル(small, 約500MB)をダウンロードします。\nよろしいですか?",
+            "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        return proceed == DialogResult.Yes;
+    }
+
+    /// <summary>手動でファイルを指定した場合(話者分離なし)。</summary>
+    private void EnqueueTranscriptionWithConsent(string wavPath)
+    {
+        if (ConfirmModelDownloadIfNeeded())
+            _transcriptionQueue.Enqueue(wavPath);
+    }
+
+    /// <summary>録音停止直後、マイク・スピーカーを話者分離して文字起こしする場合。</summary>
+    private void EnqueueDiarizedTranscriptionWithConsent(string displayWavPath, string micWavPath, string speakerWavPath)
+    {
+        if (ConfirmModelDownloadIfNeeded())
+            _transcriptionQueue.EnqueueDiarized(displayWavPath, micWavPath, speakerWavPath);
     }
 
     private void OpenRecordedFile()
@@ -350,6 +398,8 @@ public sealed class MainForm : Form
         _btnStop.Enabled = false;
         _recorder.Stop();
         var wavPath = _recorder.OutputPath;
+        var micPath = _recorder.MicOutputPath;
+        var speakerPath = _recorder.SpeakerOutputPath;
 
         _btnStart.Enabled = true;
         _cmbMic.Enabled = true;
@@ -358,20 +408,10 @@ public sealed class MainForm : Form
         _btnOpenFolder.Enabled = true;
         _lblStatus.Text = "停止しました";
 
-        if (_settings.AutoTranscribe && !string.IsNullOrEmpty(wavPath))
+        if (_settings.AutoTranscribe && !string.IsNullOrEmpty(wavPath) &&
+            !string.IsNullOrEmpty(micPath) && !string.IsNullOrEmpty(speakerPath))
         {
-            if (!Transcriber.IsModelDownloaded)
-            {
-                var proceed = MessageBox.Show(this,
-                    "初回のみ、文字起こし用のWhisperモデル(small, 約500MB)をダウンロードします。\nよろしいですか?",
-                    "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (proceed == DialogResult.Yes)
-                    _transcriptionQueue.Enqueue(wavPath);
-            }
-            else
-            {
-                _transcriptionQueue.Enqueue(wavPath);
-            }
+            EnqueueDiarizedTranscriptionWithConsent(wavPath, micPath, speakerPath);
         }
 
         return Task.CompletedTask;
