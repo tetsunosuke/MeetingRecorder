@@ -27,8 +27,20 @@ public sealed class MainForm : Form
     private readonly Button _btnBrowse = new() { Text = "参照...", Width = 80 };
     private readonly CheckBox _chkAutoTranscribe = new()
     {
-        Text = "録音停止後に自動でWhisper(small)によるローカル文字起こしを行う",
+        Text = "録音停止後に自動でローカル文字起こしを行う",
         AutoSize = true,
+    };
+    private readonly ComboBox _cmbWhisperModel = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
+    private readonly Label _lblModelManage = new() { Text = "ダウンロード済みモデルの管理:", AutoSize = true };
+    private readonly Dictionary<WhisperModelSize, Label> _modelStatusLabels = new();
+    private readonly Dictionary<WhisperModelSize, Button> _modelActionButtons = new();
+
+    private static readonly ModelOption[] ModelOptions =
+    {
+        new("tiny(約75MB・最速、精度は低め)", WhisperModelSize.Tiny),
+        new("base(約150MB)", WhisperModelSize.Base),
+        new("small(約500MB・推奨)", WhisperModelSize.Small),
+        new("medium(約1.5GB・高精度、処理は遅い)", WhisperModelSize.Medium),
     };
 
     private readonly AudioRecorder _recorder = new();
@@ -80,6 +92,11 @@ public sealed class MainForm : Form
 
         _txtOutputFolder.Leave += (_, _) => SaveSettingsFromUi();
         _chkAutoTranscribe.CheckedChanged += (_, _) => SaveSettingsFromUi();
+        _cmbWhisperModel.SelectedIndexChanged += async (_, _) =>
+        {
+            SaveSettingsFromUi();
+            await PromptDownloadIfModelMissingAsync(_settings.WhisperModel);
+        };
 
         _transcriptionQueue.StatusChanged += (_, status) =>
         {
@@ -241,23 +258,135 @@ public sealed class MainForm : Form
         _chkAutoTranscribe.Top = 84;
         _chkAutoTranscribe.MaximumSize = new Size(600, 0);
 
+        var lblWhisperModel = new Label { Text = "文字起こしモデル:", AutoSize = true, Left = left, Top = 118 };
+        _cmbWhisperModel.Left = left;
+        _cmbWhisperModel.Top = 142;
+        _cmbWhisperModel.Items.AddRange(ModelOptions);
+
+        _lblModelManage.Left = left;
+        _lblModelManage.Top = 182;
+
         _tabSettings.Controls.AddRange(new Control[]
         {
-            lblFolder, _txtOutputFolder, _btnBrowse, _chkAutoTranscribe
+            lblFolder, _txtOutputFolder, _btnBrowse, _chkAutoTranscribe, lblWhisperModel, _cmbWhisperModel,
+            _lblModelManage
         });
+
+        var rowTop = 206;
+        foreach (var option in ModelOptions)
+        {
+            var nameLabel = new Label { Text = option.Label, AutoSize = true, Left = left, Top = rowTop + 4, Width = 220 };
+            var statusLabel = new Label { Text = "", AutoSize = true, Left = left + 250, Top = rowTop + 4, ForeColor = SystemColors.GrayText };
+            var actionButton = new Button { Text = "", Left = left + 420, Top = rowTop, Width = 90, Height = 26 };
+
+            actionButton.Click += (_, _) => OnModelActionButtonClick(option.Size);
+
+            _modelStatusLabels[option.Size] = statusLabel;
+            _modelActionButtons[option.Size] = actionButton;
+            _tabSettings.Controls.AddRange(new Control[] { nameLabel, statusLabel, actionButton });
+
+            rowTop += 30;
+        }
+
+        RefreshModelManagementUi();
+    }
+
+    private void RefreshModelManagementUi()
+    {
+        foreach (var size in _modelStatusLabels.Keys)
+        {
+            var bytes = Transcriber.GetDownloadedSizeBytes(size);
+            _modelStatusLabels[size].Text = bytes.HasValue
+                ? $"ダウンロード済み ({bytes.Value / 1024.0 / 1024.0:F0}MB)"
+                : "未ダウンロード";
+            _modelActionButtons[size].Text = bytes.HasValue ? "削除" : "ダウンロード";
+            _modelActionButtons[size].Enabled = true;
+        }
+    }
+
+    private async void OnModelActionButtonClick(WhisperModelSize size)
+    {
+        if (Transcriber.IsModelDownloaded(size))
+        {
+            var confirm = MessageBox.Show(this,
+                $"{size}モデルを削除しますか?再度使うにはもう一度ダウンロードが必要になります。",
+                "モデルの削除", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+                return;
+
+            try
+            {
+                Transcriber.DeleteModel(size);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"削除に失敗しました:\n{ex.Message}", "エラー",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            RefreshModelManagementUi();
+            return;
+        }
+
+        await DownloadModelAsync(size);
     }
 
     private void ApplySettingsToUi()
     {
         _txtOutputFolder.Text = _settings.OutputFolder;
         _chkAutoTranscribe.Checked = _settings.AutoTranscribe;
+
+        var option = Array.Find(ModelOptions, o => o.Size == _settings.WhisperModel) ?? ModelOptions[2];
+        _cmbWhisperModel.SelectedItem = option;
     }
 
     private void SaveSettingsFromUi()
     {
         _settings.OutputFolder = _txtOutputFolder.Text;
         _settings.AutoTranscribe = _chkAutoTranscribe.Checked;
+        if (_cmbWhisperModel.SelectedItem is ModelOption option)
+            _settings.WhisperModel = option.Size;
         _settings.Save();
+    }
+
+    /// <summary>
+    /// 設定でモデルを切り替えた直後に、録音を待たずその場でダウンロードするか尋ねる。
+    /// (これまでは録音停止後に初めてダウンロードが必要と分かって驚くという問題があった)
+    /// </summary>
+    private async Task PromptDownloadIfModelMissingAsync(WhisperModelSize size)
+    {
+        if (Transcriber.IsModelDownloaded(size))
+            return;
+
+        var proceed = MessageBox.Show(this,
+            $"選択した{size}モデル({Transcriber.ApproxDownloadSize(size)})はまだダウンロードされていません。\n今すぐダウンロードしますか?\n\n(後で「設定」タブのモデル管理からいつでもダウンロードできます)",
+            "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+        if (proceed == DialogResult.Yes)
+            await DownloadModelAsync(size);
+    }
+
+    private async Task DownloadModelAsync(WhisperModelSize size)
+    {
+        if (_modelActionButtons.TryGetValue(size, out var button))
+            button.Enabled = false;
+        var statusLabel = _modelStatusLabels.GetValueOrDefault(size);
+
+        try
+        {
+            await Transcriber.EnsureModelDownloadedAsync(size, bytes =>
+            {
+                if (statusLabel != null && IsHandleCreated)
+                    BeginInvoke(() => statusLabel.Text = $"ダウンロード中... {bytes / 1024.0 / 1024.0:F0}MB");
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"ダウンロードに失敗しました:\n{ex.Message}", "エラー",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        RefreshModelManagementUi();
     }
 
     private void PickAndTranscribeFile()
@@ -278,13 +407,13 @@ public sealed class MainForm : Form
     /// <summary>
     /// Whisperモデルが未ダウンロードなら確認ダイアログを出す。Noなら文字起こしを行わない。
     /// </summary>
-    private bool ConfirmModelDownloadIfNeeded()
+    private bool ConfirmModelDownloadIfNeeded(WhisperModelSize modelSize)
     {
-        if (Transcriber.IsModelDownloaded)
+        if (Transcriber.IsModelDownloaded(modelSize))
             return true;
 
         var proceed = MessageBox.Show(this,
-            "初回のみ、文字起こし用のWhisperモデル(small, 約500MB)をダウンロードします。\nよろしいですか?",
+            $"初回のみ、文字起こし用のWhisperモデル({modelSize}, {Transcriber.ApproxDownloadSize(modelSize)})をダウンロードします。\nよろしいですか?",
             "モデルのダウンロード", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         return proceed == DialogResult.Yes;
     }
@@ -292,15 +421,17 @@ public sealed class MainForm : Form
     /// <summary>手動でファイルを指定した場合(話者分離なし)。</summary>
     private void EnqueueTranscriptionWithConsent(string wavPath)
     {
-        if (ConfirmModelDownloadIfNeeded())
-            _transcriptionQueue.Enqueue(wavPath);
+        var modelSize = _settings.WhisperModel;
+        if (ConfirmModelDownloadIfNeeded(modelSize))
+            _transcriptionQueue.Enqueue(wavPath, modelSize);
     }
 
     /// <summary>録音停止直後、マイク・スピーカーを話者分離して文字起こしする場合。</summary>
     private void EnqueueDiarizedTranscriptionWithConsent(string displayWavPath, string micWavPath, string speakerWavPath)
     {
-        if (ConfirmModelDownloadIfNeeded())
-            _transcriptionQueue.EnqueueDiarized(displayWavPath, micWavPath, speakerWavPath);
+        var modelSize = _settings.WhisperModel;
+        if (ConfirmModelDownloadIfNeeded(modelSize))
+            _transcriptionQueue.EnqueueDiarized(displayWavPath, micWavPath, speakerWavPath, modelSize);
     }
 
     private void OpenRecordedFile()
@@ -440,5 +571,13 @@ public sealed class MainForm : Form
         public MMDevice Device { get; }
         public DeviceItem(MMDevice device) => Device = device;
         public override string ToString() => Device.FriendlyName;
+    }
+
+    private sealed class ModelOption
+    {
+        public string Label { get; }
+        public WhisperModelSize Size { get; }
+        public ModelOption(string label, WhisperModelSize size) { Label = label; Size = size; }
+        public override string ToString() => Label;
     }
 }

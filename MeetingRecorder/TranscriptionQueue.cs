@@ -12,7 +12,9 @@ public sealed class TranscriptionQueue
 {
     public readonly record struct Status(string? CurrentFileName, string Phase, double Fraction, TimeSpan? Eta, int PendingCount);
 
-    private sealed record Job(string DisplayWavPath, string TxtPath, string? SingleSourcePath, string? MicSourcePath, string? SpeakerSourcePath);
+    private sealed record Job(
+        string DisplayWavPath, string TxtPath, WhisperModelSize ModelSize,
+        string? SingleSourcePath, string? MicSourcePath, string? SpeakerSourcePath);
 
     private readonly Channel<Job> _channel = Channel.CreateUnbounded<Job>();
     private int _pendingCount;
@@ -31,18 +33,18 @@ public sealed class TranscriptionQueue
     }
 
     /// <summary>1本のWAVをそのまま文字起こしする(話者分離なし)。</summary>
-    public void Enqueue(string wavPath)
+    public void Enqueue(string wavPath, WhisperModelSize modelSize)
     {
         var txtPath = Path.ChangeExtension(wavPath, ".txt");
-        EnqueueJob(new Job(wavPath, txtPath, wavPath, null, null));
+        EnqueueJob(new Job(wavPath, txtPath, modelSize, wavPath, null, null));
     }
 
     /// <summary>マイクとスピーカーを別々に文字起こしし、話者ラベル付きでマージする。
     /// <paramref name="displayWavPath"/>はテキストファイル名や通知に使う代表パス(通常はミックス済みの録音ファイル)。</summary>
-    public void EnqueueDiarized(string displayWavPath, string micWavPath, string speakerWavPath)
+    public void EnqueueDiarized(string displayWavPath, string micWavPath, string speakerWavPath, WhisperModelSize modelSize)
     {
         var txtPath = Path.ChangeExtension(displayWavPath, ".txt");
-        EnqueueJob(new Job(displayWavPath, txtPath, null, micWavPath, speakerWavPath));
+        EnqueueJob(new Job(displayWavPath, txtPath, modelSize, null, micWavPath, speakerWavPath));
     }
 
     private void EnqueueJob(Job job)
@@ -86,14 +88,14 @@ public sealed class TranscriptionQueue
                 if (job.SingleSourcePath != null)
                 {
                     await Transcriber.TranscribeToTextFileAsync(
-                        job.SingleSourcePath, job.TxtPath,
+                        job.SingleSourcePath, job.TxtPath, job.ModelSize,
                         onProgress: OnProgress, onPhase: OnPhase, onDurationKnown: OnDurationKnown)
                         .ConfigureAwait(false);
                 }
                 else
                 {
                     await Transcriber.TranscribeDiarizedToTextFileAsync(
-                        job.MicSourcePath!, job.SpeakerSourcePath!, job.TxtPath,
+                        job.MicSourcePath!, job.SpeakerSourcePath!, job.TxtPath, job.ModelSize,
                         onProgress: OnProgress, onPhase: OnPhase, onDurationKnown: OnDurationKnown)
                         .ConfigureAwait(false);
                 }

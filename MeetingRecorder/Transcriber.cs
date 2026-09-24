@@ -6,8 +6,16 @@ using Whisper.net.Ggml;
 
 namespace MeetingRecorder;
 
+public enum WhisperModelSize
+{
+    Tiny,
+    Base,
+    Small,
+    Medium,
+}
+
 /// <summary>
-/// Whisper(small モデル)を使い、録音WAVからローカルで文字起こしを行う。
+/// Whisperを使い、録音WAVからローカルで文字起こしを行う。
 /// クラウドAPIは使わず完全オフライン・無料で動く。
 /// </summary>
 public static class Transcriber
@@ -17,39 +25,99 @@ public static class Transcriber
     private static string ModelDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeetingRecorder", "models");
 
-    private static string ModelPath => Path.Combine(ModelDirectory, "ggml-small.bin");
+    private static string GetModelPath(WhisperModelSize size) =>
+        Path.Combine(ModelDirectory, $"ggml-{size.ToString().ToLowerInvariant()}.bin");
 
-    public static bool IsModelDownloaded => File.Exists(ModelPath);
+    private static GgmlType ToGgmlType(WhisperModelSize size) => size switch
+    {
+        WhisperModelSize.Tiny => GgmlType.Tiny,
+        WhisperModelSize.Base => GgmlType.Base,
+        WhisperModelSize.Small => GgmlType.Small,
+        WhisperModelSize.Medium => GgmlType.Medium,
+        _ => throw new ArgumentOutOfRangeException(nameof(size)),
+    };
 
-    // モデル(約500MB)の読み込みはそれ自体に数秒〜十数秒かかるため、キューが動いている間は
-    // 使い回して、ジョブのたびに読み直さないようにする。
+    /// <summary>モデルファイルのおおよそのサイズ(ダウンロード確認ダイアログの表示用)。</summary>
+    public static string ApproxDownloadSize(WhisperModelSize size) => size switch
+    {
+        WhisperModelSize.Tiny => "約75MB",
+        WhisperModelSize.Base => "約150MB",
+        WhisperModelSize.Small => "約500MB",
+        WhisperModelSize.Medium => "約1.5GB",
+        _ => "",
+    };
+
+    public static bool IsModelDownloaded(WhisperModelSize size) => File.Exists(GetModelPath(size));
+
+    /// <summary>ダウンロード済みモデルファイルの実サイズ(バイト)。未ダウンロードならnull。</summary>
+    public static long? GetDownloadedSizeBytes(WhisperModelSize size)
+    {
+        var path = GetModelPath(size);
+        return File.Exists(path) ? new FileInfo(path).Length : null;
+    }
+
+    // モデルの読み込みはそれ自体に数秒〜十数秒かかるため、キューが動いている間は
+    // 使い回して、ジョブのたびに読み直さないようにする。選択中のモデルが変わった場合は読み直す。
     private static WhisperFactory? _cachedFactory;
+    private static string? _cachedModelPath;
     private static readonly SemaphoreSlim FactoryLock = new(1, 1);
 
-    public static async Task EnsureModelDownloadedAsync()
+    public static async Task EnsureModelDownloadedAsync(WhisperModelSize size, Action<long>? onBytesDownloaded = null)
     {
-        if (IsModelDownloaded)
+        var modelPath = GetModelPath(size);
+        if (File.Exists(modelPath))
             return;
 
         Directory.CreateDirectory(ModelDirectory);
 
-        using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(GgmlType.Small);
-        var tempPath = ModelPath + ".tmp";
+        using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(ToGgmlType(size));
+        var tempPath = modelPath + ".tmp";
         using (var fileWriter = File.Create(tempPath))
-            await modelStream.CopyToAsync(fileWriter);
+        {
+            var buffer = new byte[256 * 1024];
+            long total = 0;
+            int read;
+            while ((read = await modelStream.ReadAsync(buffer).ConfigureAwait(false)) > 0)
+            {
+                await fileWriter.WriteAsync(buffer.AsMemory(0, read)).ConfigureAwait(false);
+                total += read;
+                onBytesDownloaded?.Invoke(total);
+            }
+        }
 
-        File.Move(tempPath, ModelPath, overwrite: true);
+        File.Move(tempPath, modelPath, overwrite: true);
     }
 
-    private static async Task<WhisperFactory> GetOrLoadFactoryAsync()
+    /// <summary>ダウンロード済みモデルファイルを削除する。使用中(キャッシュ済み)なら先に解放する。</summary>
+    public static void DeleteModel(WhisperModelSize size)
     {
-        if (_cachedFactory != null)
+        var path = GetModelPath(size);
+        if (_cachedModelPath == path)
+        {
+            _cachedFactory?.Dispose();
+            _cachedFactory = null;
+            _cachedModelPath = null;
+        }
+
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    private static async Task<WhisperFactory> GetOrLoadFactoryAsync(WhisperModelSize size)
+    {
+        var modelPath = GetModelPath(size);
+        if (_cachedFactory != null && _cachedModelPath == modelPath)
             return _cachedFactory;
 
         await FactoryLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            _cachedFactory ??= WhisperFactory.FromPath(ModelPath);
+            if (_cachedFactory != null && _cachedModelPath == modelPath)
+                return _cachedFactory;
+
+            _cachedFactory?.Dispose();
+            _cachedFactory = WhisperFactory.FromPath(modelPath);
+            _cachedModelPath = modelPath;
             return _cachedFactory;
         }
         finally
@@ -63,6 +131,7 @@ public static class Transcriber
     {
         _cachedFactory?.Dispose();
         _cachedFactory = null;
+        _cachedModelPath = null;
     }
 
     private readonly record struct RawSegment(TimeSpan Start, TimeSpan End, string Text, float NoSpeechProbability);
@@ -116,7 +185,7 @@ public static class Transcriber
     /// 1本のWAVをそのまま文字起こしする(話者分離なし)。手動でファイルを選んで再文字起こしする場合に使う。
     /// </summary>
     public static async Task TranscribeToTextFileAsync(
-        string wavPath, string txtPath,
+        string wavPath, string txtPath, WhisperModelSize modelSize,
         Action<double>? onProgress = null,
         Action<string>? onPhase = null,
         Action<TimeSpan>? onDurationKnown = null)
@@ -126,8 +195,8 @@ public static class Transcriber
             duration = probe.TotalTime;
         onDurationKnown?.Invoke(duration);
 
-        await EnsureModelDownloadedAsync().ConfigureAwait(false);
-        var whisperFactory = await GetOrLoadFactoryAsync().ConfigureAwait(false);
+        await EnsureModelDownloadedAsync(modelSize).ConfigureAwait(false);
+        var whisperFactory = await GetOrLoadFactoryAsync(modelSize).ConfigureAwait(false);
 
         var segments = await TranscribeSegmentsAsync(wavPath, whisperFactory, onProgress, onPhase).ConfigureAwait(false);
 
@@ -144,7 +213,7 @@ public static class Transcriber
     /// 1本のテキストにまとめる。録音停止後の自動文字起こしはこちらを使う。
     /// </summary>
     public static async Task TranscribeDiarizedToTextFileAsync(
-        string micWavPath, string speakerWavPath, string txtPath,
+        string micWavPath, string speakerWavPath, string txtPath, WhisperModelSize modelSize,
         Action<double>? onProgress = null,
         Action<string>? onPhase = null,
         Action<TimeSpan>? onDurationKnown = null)
@@ -155,8 +224,8 @@ public static class Transcriber
 
         onDurationKnown?.Invoke(micDuration > speakerDuration ? micDuration : speakerDuration);
 
-        await EnsureModelDownloadedAsync().ConfigureAwait(false);
-        var whisperFactory = await GetOrLoadFactoryAsync().ConfigureAwait(false);
+        await EnsureModelDownloadedAsync(modelSize).ConfigureAwait(false);
+        var whisperFactory = await GetOrLoadFactoryAsync(modelSize).ConfigureAwait(false);
 
         // 進捗はマイク・スピーカーそれぞれの長さに応じた重み付けで合算する
         var totalSeconds = micDuration.TotalSeconds + speakerDuration.TotalSeconds;
