@@ -1,40 +1,34 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 
 namespace MeetingRecorder;
 
 /// <summary>
 /// マイク入力(WasapiCapture)とスピーカー出力(WasapiLoopbackCapture)を同時にキャプチャし、
-/// 1本のWAVファイルにミックスして書き出す。仮想オーディオデバイスは使わない。
+/// ミックス済み1本 + 話者別(マイク/スピーカー)2本のWAVファイルとして書き出す。
+/// 仮想オーディオデバイスは使わない。
 /// </summary>
 public sealed class AudioRecorder : IDisposable
 {
-    private readonly WaveFormat _targetFormat = WaveFormat.CreateIeeeFloatWaveFormat(44100, 2);
     private const int PumpIntervalMs = 100;
 
     private WasapiCapture? _micCapture;
     private WasapiLoopbackCapture? _loopbackCapture;
     private BufferedWaveProvider? _micBuffer;
     private BufferedWaveProvider? _loopbackBuffer;
-    private MixingSampleProvider? _mixer;
-    private WaveFileWriter? _writer;
-    private WaveFileWriter? _micWriter;
-    private WaveFileWriter? _speakerWriter;
+    private RecordingPump? _pump;
     private System.Threading.Timer? _pumpTimer;
-    private float[] _pumpBuffer = Array.Empty<float>();
-    private readonly object _writeLock = new();
 
     public bool IsRecording { get; private set; }
     public string? OutputPath { get; private set; }
 
-    /// <summary>マイク単独の録音ファイル(話者分離用)。</summary>
+    /// <summary>マイク単独の録音ファイル(話者分離用)。ミックス済みファイルと同じ長さ・同じ時刻軸。</summary>
     public string? MicOutputPath { get; private set; }
 
-    /// <summary>スピーカー出力単独の録音ファイル(話者分離用)。</summary>
+    /// <summary>スピーカー出力単独の録音ファイル(話者分離用)。ミックス済みファイルと同じ長さ・同じ時刻軸。</summary>
     public string? SpeakerOutputPath { get; private set; }
 
-    public TimeSpan Elapsed => _writer?.TotalTime ?? TimeSpan.Zero;
+    public TimeSpan Elapsed => _pump?.Elapsed ?? TimeSpan.Zero;
 
     public event EventHandler<Exception>? ErrorOccurred;
 
@@ -71,27 +65,16 @@ public sealed class AudioRecorder : IDisposable
             BufferDuration = TimeSpan.FromSeconds(5)
         };
 
-        _micCapture.DataAvailable += OnMicDataAvailable;
-        _loopbackCapture.DataAvailable += OnLoopbackDataAvailable;
-        _micCapture.RecordingStopped += OnCaptureStopped;
-        _loopbackCapture.RecordingStopped += OnCaptureStopped;
-
-        var micSample = ToTargetFormat(_micBuffer.ToSampleProvider());
-        var loopbackSample = ToTargetFormat(_loopbackBuffer.ToSampleProvider());
-
-        _mixer = new MixingSampleProvider(_targetFormat) { ReadFully = true };
-        _mixer.AddMixerInput(micSample);
-        _mixer.AddMixerInput(loopbackSample);
-
         var dir = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        _writer = new WaveFileWriter(outputPath, _targetFormat);
-        // 話者分離のため、マイクとスピーカーはミックス前の単独音声も別ファイルに残す。
-        _micWriter = new WaveFileWriter(MicOutputPath, _micCapture.WaveFormat);
-        _speakerWriter = new WaveFileWriter(SpeakerOutputPath, _loopbackCapture.WaveFormat);
-        _pumpBuffer = new float[_targetFormat.SampleRate / (1000 / PumpIntervalMs) * _targetFormat.Channels];
+        _pump = new RecordingPump(_micBuffer, _loopbackBuffer, outputPath, MicOutputPath, SpeakerOutputPath);
+
+        _micCapture.DataAvailable += OnMicDataAvailable;
+        _loopbackCapture.DataAvailable += OnLoopbackDataAvailable;
+        _micCapture.RecordingStopped += OnCaptureStopped;
+        _loopbackCapture.RecordingStopped += OnCaptureStopped;
 
         _micCapture.StartRecording();
         _loopbackCapture.StartRecording();
@@ -100,19 +83,13 @@ public sealed class AudioRecorder : IDisposable
         _pumpTimer = new System.Threading.Timer(PumpAudio, null, PumpIntervalMs, PumpIntervalMs);
     }
 
-    private void OnMicDataAvailable(object? sender, WaveInEventArgs e)
-    {
+    // ここではバッファに積むだけにする。ファイルへの書き出しは必ずRecordingPump経由(実時間に揃えた
+    // 長さで書く)にしないと、音が鳴っていない間データが来ないループバックの時刻軸が詰まってしまう。
+    private void OnMicDataAvailable(object? sender, WaveInEventArgs e) =>
         _micBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
-        lock (_writeLock)
-            _micWriter?.Write(e.Buffer, 0, e.BytesRecorded);
-    }
 
-    private void OnLoopbackDataAvailable(object? sender, WaveInEventArgs e)
-    {
+    private void OnLoopbackDataAvailable(object? sender, WaveInEventArgs e) =>
         _loopbackBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
-        lock (_writeLock)
-            _speakerWriter?.Write(e.Buffer, 0, e.BytesRecorded);
-    }
 
     private void OnCaptureStopped(object? sender, StoppedEventArgs e)
     {
@@ -125,21 +102,13 @@ public sealed class AudioRecorder : IDisposable
         if (!IsRecording)
             return;
 
-        lock (_writeLock)
+        try
         {
-            if (_writer == null || _mixer == null)
-                return;
-
-            try
-            {
-                int read = _mixer.Read(_pumpBuffer, 0, _pumpBuffer.Length);
-                if (read > 0)
-                    _writer.WriteSamples(_pumpBuffer, 0, read);
-            }
-            catch (Exception ex)
-            {
-                ErrorOccurred?.Invoke(this, ex);
-            }
+            _pump?.PumpOnce();
+        }
+        catch (Exception ex)
+        {
+            ErrorOccurred?.Invoke(this, ex);
         }
     }
 
@@ -152,21 +121,6 @@ public sealed class AudioRecorder : IDisposable
         var name = Path.GetFileNameWithoutExtension(path);
         var ext = Path.GetExtension(path);
         return Path.Combine(dir, $"{name}{suffix}{ext}");
-    }
-
-    private ISampleProvider ToTargetFormat(ISampleProvider source)
-    {
-        ISampleProvider result = source;
-
-        if (result.WaveFormat.SampleRate != _targetFormat.SampleRate)
-            result = new WdlResamplingSampleProvider(result, _targetFormat.SampleRate);
-
-        if (result.WaveFormat.Channels == 1 && _targetFormat.Channels == 2)
-            result = new MonoToStereoSampleProvider(result);
-        else if (result.WaveFormat.Channels == 2 && _targetFormat.Channels == 1)
-            result = new StereoToMonoSampleProvider(result);
-
-        return result;
     }
 
     public void Stop()
@@ -182,30 +136,10 @@ public sealed class AudioRecorder : IDisposable
         _micCapture?.StopRecording();
         _loopbackCapture?.StopRecording();
 
-        // キャプチャ停止直後に届く最後のDataAvailableがバッファに乗るまで少し待つ
+        // キャプチャ停止直後に届く最後のDataAvailableがバッファに乗るまで少し待ってから、
+        // 現在時刻までの残りを書き切る。
         Thread.Sleep(150);
-
-        // バッファに残っている分を書き出す。
-        // _mixerはReadFully=trueのため、空になっても無音で埋めて要求サイズを返し続け、
-        // 絶対に0を返さない(=while(read>0)で回すと無限ループしてUIがフリーズする)。
-        // 実際に溜まっているバイト数から必要な回数だけ読む。
-        if (_mixer != null && _writer != null)
-        {
-            lock (_writeLock)
-            {
-                int bufferedBytes = (_micBuffer?.BufferedBytes ?? 0) + (_loopbackBuffer?.BufferedBytes ?? 0);
-                int chunkBytes = _pumpBuffer.Length * sizeof(float);
-                int chunksToFlush = bufferedBytes / chunkBytes + 2;
-
-                for (int i = 0; i < chunksToFlush; i++)
-                {
-                    int read = _mixer.Read(_pumpBuffer, 0, _pumpBuffer.Length);
-                    if (read <= 0)
-                        break;
-                    _writer.WriteSamples(_pumpBuffer, 0, read);
-                }
-            }
-        }
+        _pump?.PumpOnce();
 
         if (_micCapture != null)
         {
@@ -218,15 +152,8 @@ public sealed class AudioRecorder : IDisposable
             _loopbackCapture.RecordingStopped -= OnCaptureStopped;
         }
 
-        _writer?.Dispose();
-        _writer = null;
-        lock (_writeLock)
-        {
-            _micWriter?.Dispose();
-            _micWriter = null;
-            _speakerWriter?.Dispose();
-            _speakerWriter = null;
-        }
+        _pump?.Dispose();
+        _pump = null;
 
         _micCapture?.Dispose();
         _micCapture = null;

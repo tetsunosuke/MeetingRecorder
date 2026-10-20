@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\MeetingRecorder\AudioRecorder.cs" Link="AudioRecorder.cs" />
+    <Compile Include="..\MeetingRecorder\RecordingPump.cs" Link="RecordingPump.cs" />
     <Compile Include="..\MeetingRecorder\Transcriber.cs" Link="Transcriber.cs" />
   </ItemGroup>
 

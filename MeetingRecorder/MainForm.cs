@@ -400,8 +400,41 @@ public sealed class MainForm : Form
                 : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
         };
 
-        if (dialog.ShowDialog(this) == DialogResult.OK)
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        // 選んだのがミックス済み(meeting_xxx.wav)でも、同じフォルダに話者別ファイル(_mic/_speaker)が
+        // あればそちらを使う。ミックス済みを渡すと話者が混ざったまま文字起こしされてしまうため。
+        if (TryFindTrackSet(dialog.FileName, out var mainPath, out var micPath, out var speakerPath))
+            EnqueueDiarizedTranscriptionWithConsent(mainPath, micPath, speakerPath);
+        else
             EnqueueTranscriptionWithConsent(dialog.FileName);
+    }
+
+    /// <summary>
+    /// meeting_xxx.wav / meeting_xxx_mic.wav / meeting_xxx_speaker.wav のどれを選んでも、
+    /// 同じ録音の組(ミックス・マイク・スピーカー)を見つける。マイクとスピーカー両方が揃っているときだけtrue。
+    /// </summary>
+    private static bool TryFindTrackSet(string pickedPath, out string mainPath, out string micPath, out string speakerPath)
+    {
+        var dir = Path.GetDirectoryName(pickedPath) ?? "";
+        var name = Path.GetFileNameWithoutExtension(pickedPath);
+        var ext = Path.GetExtension(pickedPath);
+
+        var baseName = name;
+        foreach (var suffix in new[] { "_mic", "_speaker" })
+        {
+            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                baseName = name[..^suffix.Length];
+                break;
+            }
+        }
+
+        mainPath = Path.Combine(dir, baseName + ext);
+        micPath = Path.Combine(dir, baseName + "_mic" + ext);
+        speakerPath = Path.Combine(dir, baseName + "_speaker" + ext);
+        return File.Exists(micPath) && File.Exists(speakerPath);
     }
 
     /// <summary>

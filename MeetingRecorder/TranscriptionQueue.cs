@@ -96,7 +96,8 @@ public sealed class TranscriptionQueue
                 {
                     await Transcriber.TranscribeDiarizedToTextFileAsync(
                         job.MicSourcePath!, job.SpeakerSourcePath!, job.TxtPath, job.ModelSize,
-                        onProgress: OnProgress, onPhase: OnPhase, onDurationKnown: OnDurationKnown)
+                        onProgress: OnProgress, onPhase: OnPhase, onDurationKnown: OnDurationKnown,
+                        mixedWavPath: job.DisplayWavPath)
                         .ConfigureAwait(false);
                 }
 
