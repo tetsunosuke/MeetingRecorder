@@ -13,6 +13,8 @@ public sealed class MainForm : Form
     private readonly ComboBox _cmbSpeaker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420 };
     private readonly ProgressBar _meterMic = new() { Width = 420, Height = 14, Minimum = 0, Maximum = 100 };
     private readonly ProgressBar _meterSpeaker = new() { Width = 420, Height = 14, Minimum = 0, Maximum = 100 };
+    private readonly CheckBox _chkMuteMic = new() { Text = "マイクをミュート", AutoSize = true };
+    private readonly CheckBox _chkMuteSpeaker = new() { Text = "スピーカーをミュート", AutoSize = true };
     private readonly Button _btnStart = new() { Text = "録音開始", Width = 130, Height = 36 };
     private readonly Button _btnStop = new() { Text = "録音停止", Width = 130, Height = 36, Enabled = false };
     private readonly Label _lblStatus = new() { Text = "待機中", AutoSize = true };
@@ -80,6 +82,8 @@ public sealed class MainForm : Form
         _btnBrowse.Click += (_, _) => BrowseFolder();
         _btnStart.Click += (_, _) => StartRecording();
         _btnStop.Click += async (_, _) => await StopRecordingAsync();
+        _chkMuteMic.CheckedChanged += (_, _) => _recorder.MicMuted = _chkMuteMic.Checked;
+        _chkMuteSpeaker.CheckedChanged += (_, _) => _recorder.SpeakerMuted = _chkMuteSpeaker.Checked;
         _uiTimer.Tick += (_, _) => UpdateStatus();
         _uiTimer.Start();
 
@@ -216,6 +220,12 @@ public sealed class MainForm : Form
         _meterSpeaker.Left = left;
         _meterSpeaker.Top = 156;
 
+        // ミュート中の区間は、その側の録音ファイル(話者別・ミックス済み)が無音になる
+        _chkMuteMic.Left = left + _cmbMic.Width + 12;
+        _chkMuteMic.Top = 46;
+        _chkMuteSpeaker.Left = left + _cmbSpeaker.Width + 12;
+        _chkMuteSpeaker.Top = 130;
+
         _btnStart.Left = left;
         _btnStart.Top = 198;
         _btnStop.Left = left + _btnStart.Width + 16;
@@ -238,7 +248,7 @@ public sealed class MainForm : Form
 
         _tabRecord.Controls.AddRange(new Control[]
         {
-            lblMic, _cmbMic, _meterMic, lblSpeaker, _cmbSpeaker, _meterSpeaker,
+            lblMic, _cmbMic, _chkMuteMic, _meterMic, lblSpeaker, _cmbSpeaker, _chkMuteSpeaker, _meterSpeaker,
             _btnStart, _btnStop, _lblStatus, _lblFile, _lblTranscribeStatus, _btnOpenFile, _btnOpenFolder,
             _btnTranscribeFile
         });
@@ -583,12 +593,18 @@ public sealed class MainForm : Form
 
     private void UpdateStatus()
     {
-        _lblStatus.Text = _recorder.IsRecording
-            ? $"● 録音中 {_recorder.Elapsed:hh\\:mm\\:ss}"
-            : "待機中";
+        var muted = new List<string>();
+        if (_recorder.MicMuted) muted.Add("マイク");
+        if (_recorder.SpeakerMuted) muted.Add("スピーカー");
+        var muteNote = muted.Count > 0 ? $"  (ミュート中: {string.Join("・", muted)})" : "";
 
-        _meterMic.Value = LevelToGaugeValue(_micMonitor.Level);
-        _meterSpeaker.Value = LevelToGaugeValue(_speakerMonitor.Level);
+        _lblStatus.Text = (_recorder.IsRecording
+            ? $"● 録音中 {_recorder.Elapsed:hh\\:mm\\:ss}"
+            : "待機中") + muteNote;
+
+        // ミュート中は録音されないので、メーターも0にして「入っていない」ことを見て分かるようにする
+        _meterMic.Value = _recorder.MicMuted ? 0 : LevelToGaugeValue(_micMonitor.Level);
+        _meterSpeaker.Value = _recorder.SpeakerMuted ? 0 : LevelToGaugeValue(_speakerMonitor.Level);
     }
 
     private static int LevelToGaugeValue(float peak)

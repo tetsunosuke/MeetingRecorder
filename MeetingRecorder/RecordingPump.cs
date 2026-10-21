@@ -35,6 +35,14 @@ internal sealed class RecordingPump : IDisposable
 
     private long _framesWritten;
     private bool _disposed;
+    private volatile bool _micMuted;
+    private volatile bool _speakerMuted;
+
+    /// <summary>trueの間、マイクの音は無音として書かれる(バッファは読み捨てるので時刻軸は崩れない)。</summary>
+    public bool MicMuted { get => _micMuted; set => _micMuted = value; }
+
+    /// <summary>trueの間、スピーカーの音は無音として書かれる。</summary>
+    public bool SpeakerMuted { get => _speakerMuted; set => _speakerMuted = value; }
 
     /// <param name="clock">録音開始からの経過時間。省略時はStopwatch(テストでは固定の時計を渡せる)。</param>
     public RecordingPump(
@@ -95,6 +103,12 @@ internal sealed class RecordingPump : IDisposable
         var samples = frames * 2;
         ReadFully(_mic, _micBuffer, samples);
         ReadFully(_loopback, _loopbackBuffer, samples);
+
+        // ミュート中も読み出し自体は行い(バッファが溜まって後から再生されないように)、中身だけ捨てる
+        if (_micMuted)
+            Array.Clear(_micBuffer, 0, samples);
+        if (_speakerMuted)
+            Array.Clear(_loopbackBuffer, 0, samples);
 
         for (var i = 0; i < samples; i++)
             _mixBuffer[i] = _micBuffer[i] + _loopbackBuffer[i];

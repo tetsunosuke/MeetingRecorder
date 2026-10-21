@@ -218,26 +218,129 @@ public static class Transcriber
             return new TrackResult(new List<RawSegment>(), WasSilent: true);
         }
 
-        wavStream.Seek(0, SeekOrigin.Begin);
-
-        using var processor = whisperFactory.CreateBuilder()
-            .WithLanguage("auto")
-            .Build();
+        // 長時間を1回で通すと、途中で一度「(英語)」のような幻覚が出ると、それが直前の文脈として
+        // 次の認識に引き継がれて抜け出せなくなる(実際に30分以上続いた)。そこで数分ごとに区切り、
+        // 区切りごとに認識器を作り直して文脈をリセットする。
+        var pcm = wavStream.ToArray();
+        var totalSamples = (pcm.Length - WavHeaderBytes) / 2;
 
         onPhase?.Invoke("文字起こし中...");
         var segments = new List<RawSegment>();
-        await foreach (var segment in processor.ProcessAsync(wavStream).ConfigureAwait(false))
+        long chunkStart = 0;
+        while (chunkStart < totalSamples)
         {
-            segments.Add(new RawSegment(segment.Start, segment.End, segment.Text.Trim(), segment.NoSpeechProbability));
+            var chunkEnd = FindChunkEnd(pcm, chunkStart, totalSamples);
+            var chunkOffset = TimeSpan.FromSeconds((double)chunkStart / WhisperSampleRate);
 
-            if (totalDuration > TimeSpan.Zero)
+            if (ChunkPeak(pcm, chunkStart, chunkEnd) >= SilencePeakThreshold)
             {
-                var fraction = Math.Clamp(segment.End.TotalSeconds / totalDuration.TotalSeconds, 0.0, 1.0);
-                onProgress?.Invoke(fraction);
+                using var chunkStream = new MemoryStream();
+                using (var writer = new WaveFileWriter(chunkStream, new WaveFormat(WhisperSampleRate, 16, 1)))
+                    writer.Write(pcm, WavHeaderBytes + (int)(chunkStart * 2), (int)((chunkEnd - chunkStart) * 2));
+                var chunkBytes = chunkStream.ToArray();
+
+                using var processor = whisperFactory.CreateBuilder()
+                    .WithLanguage("auto")
+                    .Build();
+                using var input = new MemoryStream(chunkBytes);
+                await foreach (var segment in processor.ProcessAsync(input).ConfigureAwait(false))
+                {
+                    segments.Add(new RawSegment(
+                        segment.Start + chunkOffset, segment.End + chunkOffset,
+                        segment.Text.Trim(), segment.NoSpeechProbability));
+                }
+            }
+
+            chunkStart = chunkEnd;
+            if (totalDuration > TimeSpan.Zero)
+                onProgress?.Invoke(Math.Clamp((double)chunkEnd / totalSamples, 0.0, 1.0));
+        }
+
+        return new TrackResult(RemoveHallucinations(segments), WasSilent: false);
+    }
+
+    private const int WhisperSampleRate = 16000;
+    private const int WavHeaderBytes = 44;
+    private const int ChunkTargetSeconds = 120;
+    private const int ChunkSearchSeconds = 20;
+    private const int MinTailSeconds = 30;
+
+    /// <summary>目標の長さ付近で、できるだけ静かな位置(発話の途中で切らないため)を区切りにする。</summary>
+    private static long FindChunkEnd(byte[] pcm, long start, long totalSamples)
+    {
+        var target = start + (long)ChunkTargetSeconds * WhisperSampleRate;
+        if (totalSamples - target < (long)MinTailSeconds * WhisperSampleRate)
+            return totalSamples;
+
+        const int blockSamples = WhisperSampleRate / 4;
+        var searchFrom = target - (long)ChunkSearchSeconds * WhisperSampleRate;
+        var bestEnd = target;
+        var bestEnergy = double.MaxValue;
+        for (var blockStart = searchFrom; blockStart + blockSamples <= target; blockStart += blockSamples)
+        {
+            double energy = 0;
+            for (var i = 0; i < blockSamples; i++)
+            {
+                var s = BitConverter.ToInt16(pcm, WavHeaderBytes + (int)((blockStart + i) * 2));
+                energy += (double)s * s;
+            }
+
+            if (energy < bestEnergy)
+            {
+                bestEnergy = energy;
+                bestEnd = blockStart + blockSamples / 2;
             }
         }
 
-        return new TrackResult(segments, WasSilent: false);
+        // タイムスタンプの表記が秒単位のまま揃うよう、区切りは整数秒の位置にする
+        return bestEnd / WhisperSampleRate * WhisperSampleRate;
+    }
+
+    private static float ChunkPeak(byte[] pcm, long start, long end)
+    {
+        var peak = 0;
+        for (var i = start; i < end; i++)
+            peak = Math.Max(peak, Math.Abs((int)BitConverter.ToInt16(pcm, WavHeaderBytes + (int)(i * 2))));
+        return peak / 32768f;
+    }
+
+    // 音声が途切れたり無音に近いとき、Whisperが学習データ由来の定型文を出力することがある。
+    private static readonly HashSet<string> HallucinationPhrases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // 会議で普通に言いうる「ありがとうございました」「Thank you.」「Bye.」などは、ここに入れない
+        "(英語)", "(音楽)", "(拍手)", "(笑)", "I went", "I end", "Thanks for watching!",
+        "ご視聴ありがとうございました", "ご視聴ありがとうございました。", "チャンネル登録をお願いします",
+    };
+
+    // 同じ短い文が何度も連続するときは、幻覚のループとみなして最初の1つだけ残す
+    private const int LoopRunLength = 4;
+
+    internal static List<RawSegment> RemoveHallucinations(List<RawSegment> segments)
+    {
+        var result = new List<RawSegment>(segments.Count);
+        foreach (var segment in segments)
+        {
+            var text = segment.Text.Trim();
+            if (text.Length == 0 || HallucinationPhrases.Contains(text))
+                continue;
+            result.Add(segment);
+        }
+
+        var deduped = new List<RawSegment>(result.Count);
+        for (var i = 0; i < result.Count;)
+        {
+            var run = 1;
+            while (i + run < result.Count && result[i + run].Text == result[i].Text)
+                run++;
+
+            if (run >= LoopRunLength)
+                deduped.Add(result[i]);
+            else
+                deduped.AddRange(result.GetRange(i, run));
+            i += run;
+        }
+
+        return deduped;
     }
 
     /// <summary>

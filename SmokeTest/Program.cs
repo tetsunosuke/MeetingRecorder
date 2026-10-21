@@ -20,6 +20,8 @@ Directory.CreateDirectory(dir);
 try
 {
     await TestRecordingPumpAlignmentAsync();
+    TestMute();
+    TestHallucinationFilter();
     TestMisalignedDetection();
     await TestSilentTrackSkippedAsync();
 }
@@ -80,6 +82,71 @@ Task TestRecordingPumpAlignmentAsync()
     Check(Rms(mixedPath, 2.2, 2.8) > Rms(mixedPath, 0.5, 1.5) * 1.2, "ミックス済み: スピーカーが鳴っている区間のほうが大きい");
 
     return Task.CompletedTask;
+}
+
+void TestMute()
+{
+    Console.WriteLine("--- ミュート: 該当区間だけ無音になり、時刻軸は崩れない ---");
+
+    var mixedPath = Path.Combine(dir, "m.wav");
+    var micPath = Path.Combine(dir, "m_mic.wav");
+    var speakerPath = Path.Combine(dir, "m_speaker.wav");
+
+    var micBuffer = new BufferedWaveProvider(WaveFormat.CreateIeeeFloatWaveFormat(48000, 2))
+    { DiscardOnBufferOverflow = true, BufferDuration = TimeSpan.FromSeconds(5) };
+    var speakerBuffer = new BufferedWaveProvider(WaveFormat.CreateIeeeFloatWaveFormat(44100, 2))
+    { DiscardOnBufferOverflow = true, BufferDuration = TimeSpan.FromSeconds(5) };
+
+    long micIndex = 0, speakerIndex = 0;
+    var now = TimeSpan.Zero;
+
+    using (var pump = new RecordingPump(micBuffer, speakerBuffer, mixedPath, micPath, speakerPath, () => now))
+    {
+        for (var tick = 0; tick < 60; tick++) // 6秒、両方とも鳴りっぱなし
+        {
+            // 2〜4秒: マイクをミュート / 3〜5秒: スピーカーをミュート
+            pump.MicMuted = tick is >= 20 and < 40;
+            pump.SpeakerMuted = tick is >= 30 and < 50;
+
+            AddTone(micBuffer, 48000, 0.1, 440, 0.3f, ref micIndex);
+            AddTone(speakerBuffer, 44100, 0.1, 880, 0.3f, ref speakerIndex);
+
+            now += TimeSpan.FromMilliseconds(100);
+            pump.PumpOnce();
+        }
+    }
+
+    Check(Math.Abs(DurationOf(micPath).TotalSeconds - 6.0) < 0.05, "ミュートしても長さは6秒のまま");
+    Check(Rms(micPath, 0.3, 1.7) > 0.1, "マイク: ミュート前は音がある");
+    Check(Rms(micPath, 2.2, 3.8) < 0.01, "マイク: 2〜4秒のミュート区間は無音");
+    Check(Rms(micPath, 4.2, 5.8) > 0.1, "マイク: ミュート解除後は音が戻る");
+    Check(Rms(speakerPath, 0.3, 2.7) > 0.1, "スピーカー: ミュート前は音がある");
+    Check(Rms(speakerPath, 3.2, 4.8) < 0.01, "スピーカー: 3〜5秒のミュート区間は無音");
+    Check(Rms(speakerPath, 5.2, 5.8) > 0.1, "スピーカー: ミュート解除後は音が戻る");
+    Check(Rms(mixedPath, 3.2, 3.8) < 0.01, "ミックス済み: 両方ミュートの3〜4秒は無音");
+    Check(Rms(mixedPath, 2.2, 2.8) > 0.05, "ミックス済み: マイクだけミュートの区間もスピーカーの音は残る");
+}
+
+void TestHallucinationFilter()
+{
+    Console.WriteLine("--- 幻覚(定型文・ループ)の除去 ---");
+    static Transcriber.RawSegment Seg(int sec, string text) =>
+        new(TimeSpan.FromSeconds(sec), TimeSpan.FromSeconds(sec + 1), text, 0f);
+
+    var input = new List<Transcriber.RawSegment>
+    {
+        Seg(0, "ありがとうございました"), Seg(1, "(英語)"), Seg(2, "I went"), Seg(3, "I end"), Seg(4, "(音楽)"),
+        Seg(5, "よろしくお願いします"),
+        Seg(6, "ん"), Seg(7, "ん"), Seg(8, "ん"), Seg(9, "ん"), Seg(10, "ん"),
+        Seg(11, "はい"), Seg(12, "はい"), Seg(13, "はい"),
+    };
+    var texts = Transcriber.RemoveHallucinations(input).Select(s => s.Text).ToList();
+
+    Check(texts.Contains("ありがとうございました"), "会議で普通に言う「ありがとうございました」は残す");
+    Check(!texts.Contains("(英語)") && !texts.Contains("I went") && !texts.Contains("I end") && !texts.Contains("(音楽)"),
+        "定型の幻覚文((英語)/I went/I end/(音楽))は除去");
+    Check(texts.Count(t => t == "ん") == 1, "同じ文が4回以上連続するループは最初の1つだけ残す");
+    Check(texts.Count(t => t == "はい") == 3, "3回までの連続(相づち)は残す");
 }
 
 void TestMisalignedDetection()

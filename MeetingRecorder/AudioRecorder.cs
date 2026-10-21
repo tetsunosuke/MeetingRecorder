@@ -30,6 +30,33 @@ public sealed class AudioRecorder : IDisposable
 
     public TimeSpan Elapsed => _pump?.Elapsed ?? TimeSpan.Zero;
 
+    private volatile bool _micMuted;
+    private volatile bool _speakerMuted;
+
+    /// <summary>マイクをミュートする。録音中でも録音前でも切り替えられ、ミュート中の区間はマイク別・ミックス済みの両方で無音になる。</summary>
+    public bool MicMuted
+    {
+        get => _micMuted;
+        set
+        {
+            _micMuted = value;
+            if (_pump != null)
+                _pump.MicMuted = value;
+        }
+    }
+
+    /// <summary>スピーカー出力(相手の声)をミュートする。ミュート中の区間はスピーカー別・ミックス済みの両方で無音になる。</summary>
+    public bool SpeakerMuted
+    {
+        get => _speakerMuted;
+        set
+        {
+            _speakerMuted = value;
+            if (_pump != null)
+                _pump.SpeakerMuted = value;
+        }
+    }
+
     public event EventHandler<Exception>? ErrorOccurred;
 
     public void Start(string outputPath, MMDevice? micDevice, MMDevice? speakerDevice)
@@ -69,7 +96,11 @@ public sealed class AudioRecorder : IDisposable
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        _pump = new RecordingPump(_micBuffer, _loopbackBuffer, outputPath, MicOutputPath, SpeakerOutputPath);
+        _pump = new RecordingPump(_micBuffer, _loopbackBuffer, outputPath, MicOutputPath, SpeakerOutputPath)
+        {
+            MicMuted = _micMuted,
+            SpeakerMuted = _speakerMuted,
+        };
 
         _micCapture.DataAvailable += OnMicDataAvailable;
         _loopbackCapture.DataAvailable += OnLoopbackDataAvailable;
