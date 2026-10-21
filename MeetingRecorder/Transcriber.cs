@@ -315,13 +315,36 @@ public static class Transcriber
     // 同じ短い文が何度も連続するときは、幻覚のループとみなして最初の1つだけ残す
     private const int LoopRunLength = 4;
 
+    // Whisperは非発話の区間に「(音声)」「[inaudible]」「*говорит по-английски*」のような括弧書きの注釈を出すことがある。
+    // 文全体が括弧(または*)で囲まれているものは、発言ではなく注釈とみなして除く。
+    private static readonly (char Open, char Close)[] AnnotationBrackets =
+    {
+        ('(', ')'), ('（', '）'), ('[', ']'), ('［', '］'), ('*', '*'), ('＊', '＊'),
+    };
+
+    private const int AnnotationMaxLength = 60;
+
+    internal static bool IsAnnotationOnly(string text)
+    {
+        if (text.Length < 2 || text.Length > AnnotationMaxLength)
+            return false;
+
+        foreach (var (open, close) in AnnotationBrackets)
+        {
+            if (text[0] == open && text[^1] == close && text.IndexOf(close, 1) == text.Length - 1)
+                return true;
+        }
+
+        return false;
+    }
+
     internal static List<RawSegment> RemoveHallucinations(List<RawSegment> segments)
     {
         var result = new List<RawSegment>(segments.Count);
         foreach (var segment in segments)
         {
             var text = segment.Text.Trim();
-            if (text.Length == 0 || HallucinationPhrases.Contains(text))
+            if (text.Length == 0 || HallucinationPhrases.Contains(text) || IsAnnotationOnly(text))
                 continue;
             result.Add(segment);
         }

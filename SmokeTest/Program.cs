@@ -147,6 +147,16 @@ void TestHallucinationFilter()
         "定型の幻覚文((英語)/I went/I end/(音楽))は除去");
     Check(texts.Count(t => t == "ん") == 1, "同じ文が4回以上連続するループは最初の1つだけ残す");
     Check(texts.Count(t => t == "はい") == 3, "3回までの連続(相づち)は残す");
+
+    var annotations = new List<Transcriber.RawSegment>
+    {
+        Seg(0, "(音声)"), Seg(1, "[inaudible]"), Seg(2, "[Muzaika]"), Seg(3, "*говорит по-английски*"),
+        Seg(4, "（拍手）"), Seg(5, "(speaking in foreign language)"),
+        Seg(6, "(はい)が1つ目です(いいえ)"), Seg(7, "*a* と *b*"), Seg(8, "(未完了"), Seg(9, "それは(たぶん)違います"),
+    };
+    var kept = Transcriber.RemoveHallucinations(annotations).Select(s => s.Text).ToList();
+    Check(kept.Count == 4, $"文全体が括弧書きの注釈だけを除き、文中の括弧は残す (残り{kept.Count}行)");
+    Check(kept.Contains("それは(たぶん)違います") && kept.Contains("(未完了"), "括弧が文の一部・閉じていないものは残す");
 }
 
 void TestMisalignedDetection()
